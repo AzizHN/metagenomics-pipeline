@@ -1,0 +1,706 @@
+#!/usr/bin/env nextflow
+
+nextflow.enable.dsl=2
+
+params.reads="/home/aziz/pipeline/data/*.{fastq, fastq.gz}"
+params.classification_output="/home/aziz/pipeline/results/classification_before_filtration"
+
+
+params.krakenreport="/home/aziz/pipeline/results/classification_before_filtration/kraken2.report"
+params.firstfiltration_output="/home/aziz/pipeline/results/classification_after_filtration"
+
+
+params.report_filtrated1="/home/aziz/pipeline/results/classification_after_filtration/report_filtrated_1.report"
+
+params.extraction_output="/home/aziz/pipeline/results/extraction"
+params.bacterial_extraction_output="/home/aziz/pipeline/results/extraction/bacterial_extraction"
+params.fungal_extraction_output="/home/aziz/pipeline/results/extraction/fungal_extraction"
+
+params.fungal_reads_output="/home/aziz/pipeline/results/extraction/fungal_extraction/fungal_reads"
+params.bacterial_reads_output="/home/aziz/pipeline/results/extraction/bacterial_extraction/bacterial_reads"
+
+params.fungaalnames="/home/aziz/pipeline/results/extraction/fungal_species.txt"
+params.krakeenfile="/home/aziz/pipeline/results/classification_before_filtration/output.kraken"
+
+params.mapping_output="/home/aziz/pipeline/results/extraction/fungal_extraction/mapping_work"
+params.variants_in="/home/aziz/pipeline/results/extraction/fungal_extraction/mapping_work/*.fastq"
+
+params.variants_output="/home/aziz/pipeline/results/extraction/fungal_extraction/mapping_work/variants"
+
+params.assembly_output="/home/aziz/pipeline/results/extraction/bacterial_extraction/assembly"
+params.amr_output="/home/aziz/pipeline/results/extraction/bacterial_extraction/AMR_genes"
+
+params.pipereport_output="/home/aziz/pipeline/results"
+
+process taxonomic_classification {
+
+    publishDir("${params.classification_output}" , mode: 'copy')
+
+    input:
+    path sequences
+
+    output:
+    path "*" , emit: classification_out
+
+
+
+    script:
+    """
+    /home/aziz/anaconda3/envs/metagenomics/bin/kraken2 --use-names --db ~/microbialDB/ --report kraken2.report --output output.kraken $sequences
+    """
+    
+
+}
+
+process first_filtration {
+
+     publishDir("${params.firstfiltration_output}" , mode: 'copy')
+     
+     input:
+     path report
+     
+     output:
+     path "*" , emit: firstfiltration_out
+     
+     script:
+     """
+     awk 'BEGIN {skip = 0}
+   {
+    if (skip == 1 && \$4 ~ /^S[0-9]*\$/) {
+        next
+    } 
+    if (\$4 ~ /G/ && \$1 < 0.04 ) {
+        skip = 1
+        next
+    } else if ( \$4 ~ /G/ && \$1 >= 0.04 )
+        skip = 0
+
+        print
+   }' kraken2.report > report_filtrated_1.report 
+     """
+}
+
+process final_filtration {
+     
+     publishDir("${params.firstfiltration_output}" , mode: 'copy')
+     
+     input:
+     path filtrated_report1
+     
+     output:
+     path "*" , emit: finalfiltration_out
+     
+     script:
+     """
+     awk 'BEGIN {
+     FS = "\t"
+   }
+     \$4 ~ /^(S|S1|S2|S3)\$/ && \$1 < 0.01 {
+     next
+   }
+   {
+     print
+   }' report_filtrated_1.report > final_report1.report      
+     echo " pourcentage	 clade_reads	taxon_reads	Taxonomic rank	Taxonomic ID	      Taxnom name" > final_report.report
+     cat final_report1.report >> final_report.report
+     rm final_report1.report
+     """
+}
+
+process species_of_interest {
+
+     publishDir("${params.extraction_output}" , mode: 'copy') 
+     
+     input:
+     path finalreport
+     
+     output:
+     path "*" , emit: speciesofinterest_out
+     
+     script:
+     """
+     awk '\$4 == "S" && \$1 > 1' final_report.report > species_of_interest.txt
+     """   
+}
+
+process taxid {
+  
+     publishDir("${params.extraction_output}" , mode: 'copy') 
+     
+     input:
+     path speciesofinterest
+     
+     output:
+     path "*" , emit: taxid_out
+     
+     script:
+     """
+     awk '{print \$5}' species_of_interest.txt > taxid.txt
+     """  
+}
+
+process lineage {
+
+     publishDir("${params.extraction_output}" , mode: 'copy') 
+     
+     input:
+     path taxidspecies
+     
+     output:
+     path "*" , emit: lineage_out
+     
+     script:
+     """
+     /home/aziz/anaconda3/envs/taxonkit/bin/taxonkit lineage taxid.txt > lineage.txt
+     """
+}
+
+process separation {
+
+     publishDir("${params.extraction_output}" , mode: 'copy') 
+     
+     input:
+     path lineagespecies
+     
+     output:
+     path "*" , emit: separation_out
+     
+     script:
+     """
+     awk -F '\t' '\$2 ~ /^cellular organisms;Bacteria;/ { print > "bacterial_lineage.txt"; system("cp bacterial_lineage.txt /home/aziz/pipeline/results/extraction/bacterial_extraction/") } \$2 ~ /^cellular organisms;Eukaryota;Opisthokonta;Fungi;/ { print > "fungal_lineage.txt"; system("cp fungal_lineage.txt /home/aziz/pipeline/results/extraction/fungal_extraction/") }' lineage.txt 
+     
+     
+     
+     """     
+}
+
+process names {
+     
+     publishDir("${params.extraction_output}" , mode: 'copy') 
+     
+     input:
+     path separationspecies
+     
+     output:
+     path "*" , emit: names_out
+     
+     script:
+     """
+     if [[ -f "fungal_lineage.txt" ]]; then
+     awk -F ';' '{ split(\$0, fields, ";"); print fields[length(fields)] }' fungal_lineage.txt > fungal_species.txt
+     cp fungal_species.txt /home/aziz/pipeline/results/extraction/fungal_extraction/
+     else
+     echo "fungal_lineage.txt not found. Skipping creation of fungal_species.txt."
+     fi
+     if [[ -f "bacterial_lineage.txt" ]]; then
+     awk -F ';' '{ split(\$0, fields, ";"); print fields[length(fields)] }' bacterial_lineage.txt > bacterial_species.txt
+     cp bacterial_species.txt /home/aziz/pipeline/results/extraction/bacterial_extraction/
+     else
+     echo "bacterial_lineage.txt not found. Skipping creation of bacterial_species.txt."
+     fi
+     
+     """     
+}
+
+
+process fungal_accessions_extraction {
+
+ publishDir("${params.fungal_extraction_output}" , mode: 'copy') 
+     
+     input:
+     path krakenfile
+
+     output:
+     path "*" , emit: accessionsfun_extracted_out
+     
+     script:
+     """
+     if [[ -f "/home/aziz/pipeline/results/extraction/fungal_extraction/fungal_species.txt" ]]; then
+	while IFS= read -r species_name
+	do 
+		awk -F'\t' -v specie="\$species_name" '\$3 ~ specie {print}' "/home/aziz/pipeline/results/classification_before_filtration/output.kraken" > "lines_\${species_name}.txt" 
+		awk -F'\t' '{print \$2}' "lines_\${species_name}.txt" > "accessions_\${species_name}.txt"
+		awk '{print "@" \$0}' "accessions_\${species_name}.txt" > "full_accessions_\${species_name}.txt"
+	
+	done < fungal_species.txt
+    else
+	touch fungal_full_accessions_null.txt
+    fi
+     """
+}	
+
+process fungal_reads_extraction {
+
+ publishDir("${params.fungal_extraction_output}" , mode: 'copy') 
+ 
+ input:
+ path seq
+ 
+ output:
+ path "*" , emit: readsfun_extrcated_out
+ 
+ script:
+ """
+    if [[ -f "/home/aziz/pipeline/results/extraction/fungal_extraction/fungal_species.txt" ]]; then
+	file=\$(find /home/aziz/pipeline/data/ -name '*.fastq')
+	while IFS= read -r speciename
+	do
+		cat \$file | awk 'NR==FNR {x[\$1]=1; next} \$1 in x {print; getline; print; getline; print; getline; print}' "full_accessions_\${speciename}.txt" - > "\${speciename}.fastq"
+ 		mv "\${speciename}.fastq" "\${speciename// /_}.fastq"
+	done < "/home/aziz/pipeline/results/extraction/fungal_extraction/fungal_species.txt" 
+    else
+	touch fungal_reads_null.txt
+    fi
+ """
+}
+
+
+
+process bacterial_accessions_extraction {
+
+ publishDir("${params.bacterial_extraction_output}" , mode: 'copy') 
+     
+     input:
+     path krakenfiile
+
+     output:
+     path "*" , emit: accessionsbac_extracted_out
+     
+     script:
+     """
+   if [[ -f "/home/aziz/pipeline/results/extraction/bacterial_species.txt" ]]; then
+	while IFS= read -r species_name
+	do 
+		awk -F'\t' -v specie="\$species_name" '\$3 ~ specie {print}' "/home/aziz/pipeline/results/classification_before_filtration/output.kraken" > "lines_\${species_name}.txt" 
+		awk -F'\t' '{print \$2}' "lines_\${species_name}.txt" > "accessions_\${species_name}.txt"
+		awk '{print "@" \$0}' "accessions_\${species_name}.txt" > "full_accessions_\${species_name}.txt"
+	
+	done < "/home/aziz/pipeline/results/extraction/bacterial_species.txt"
+   else
+	touch bacterial_full_accessions_null.txt
+    fi
+   
+
+     """
+}
+
+
+
+
+process bacterial_reads_extraction {
+
+ publishDir("${params.bacterial_extraction_output}" , mode: 'copy') 
+ 
+ input:
+ path seq
+ 
+ output:
+ path "*" , emit: readsbac_extrcated_out
+ 
+ script:
+ """
+   if [[ -f "/home/aziz/pipeline/results/extraction/bacterial_species.txt" ]]; then
+	file=\$(find /home/aziz/pipeline/data/ -name '*.fastq')
+	while IFS= read -r speciename
+	do
+		cat \$file | awk 'NR==FNR {x[\$1]=1; next} \$1 in x {print; getline; print; getline; print; getline; print}' "full_accessions_\${speciename}.txt" - > "\${speciename}.fastq"
+		mv "\${speciename}.fastq" "\${speciename// /_}.fastq"
+	done < "/home/aziz/pipeline/results/extraction/bacterial_extraction/bacterial_species.txt" 
+    else
+	touch bacterial_reads_null.txt
+    fi
+ """
+}
+
+process mapping {
+
+publishDir("${params.mapping_output}" , mode: 'copy') 
+
+input:
+path mappers
+
+output:
+path "*" , emit: mapping_out
+
+script:
+"""
+if [[ \$(find /home/aziz/pipeline/results/extraction/fungal_extraction -name '*.fastq') ]]; then
+	for fastqfile in /home/aziz/pipeline/results/extraction/fungal_extraction/*.fastq
+	do
+		fastq_basename=\$(basename "\${fastqfile}" .fastq)
+		/home/aziz/anaconda3/envs/mapping/bin/minimap2 -ax map-ont /home/aziz/pipeline/genes.fna "\$fastqfile" > "aln_\${fastq_basename}.sam"
+	done
+else
+	touch mapping_null.txt
+fi
+
+"""
+}
+
+process SAMtoBAM {
+
+publishDir("${params.mapping_output}" , mode: 'copy') 
+
+input:
+path alnfiles
+
+output:
+path "*" , emit: samtobam_out
+
+script:
+"""
+if [[ \$(find /home/aziz/pipeline/results/extraction/fungal_extraction/mapping_work -name '*.sam') ]]; then
+	for alnfile in /home/aziz/pipeline/results/extraction/fungal_extraction/mapping_work/*.sam
+	do
+		aln_basename=\$(basename "\${alnfile}" .sam)
+		/home/aziz/anaconda3/envs/second_part/bin/samtools view -bS "\$alnfile" > "\${aln_basename}.bam"
+		/home/aziz/anaconda3/envs/second_part/bin/samtools view -F 4 -b "\${aln_basename}.bam" > "mapped_\${aln_basename}.bam"
+		/home/aziz/anaconda3/envs/second_part/bin/samtools sort -o "sorted_mapped_\${aln_basename}.bam" "mapped_\${aln_basename}.bam"
+		/home/aziz/anaconda3/envs/second_part/bin/samtools index "sorted_mapped_\${aln_basename}.bam"
+		rm "\${aln_basename}.bam"
+		rm "mapped_\${aln_basename}.bam"
+	done
+else
+	touch samTObam_null.txt
+fi
+
+"""
+}
+
+process BAMtoFASTQ {
+
+publishDir("${params.mapping_output}" , mode: 'copy')
+
+input:
+path bamfiles
+
+output:
+path "*" , emit: bamtofastq_out
+
+script:
+"""
+if [[ \$(find /home/aziz/pipeline/results/extraction/fungal_extraction/mapping_work -name '*.bam') ]]; then
+	for bamfile in /home/aziz/pipeline/results/extraction/fungal_extraction/mapping_work/*.bam
+	do
+		bam_basename=\$(basename "\${bamfile}" .bam)
+		/home/aziz/anaconda3/envs/second_part/bin/samtools bam2fq "\$bamfile" > "\${bam_basename}.fastq"
+
+	done
+else
+	touch bamTOfastq_null.txt
+fi
+"""
+}
+
+process variantscalling_medaka {
+
+publishDir("${params.variants_output}" , mode: 'copy') 
+
+input:
+path fastqfileeess
+
+output:
+path "*" , emit: variaaaaaant
+
+script:
+"""
+if [[ \$(find /home/aziz/pipeline/results/extraction/fungal_extraction/mapping_work -name '*.fastq') ]]; then
+	for fastqfille in /home/aziz/pipeline/results/extraction/fungal_extraction/mapping_work/*.fastq
+	do
+		if [ -s "\$fastqfille" ]; then
+			fastq_basename=\$(basename "\${fastqfille}" .fastq)
+			/home/aziz/anaconda3/envs/second_part/bin/medaka_haploid_variant -i "\$fastqfille" -r /home/aziz/pipeline/genes.fna -o medaka_\${fastq_basename}
+		fi
+	done
+else
+	touch variantcalling_medaka_null.txt
+fi
+"""
+}
+
+process variants_filtration {
+
+publishDir("${params.variants_output}" , mode: 'copy') 
+
+input:
+path variantsfiles
+
+output:
+path "*" , emit: filtratedvariants
+
+script:
+"""
+if [[ \$(find /home/aziz/pipeline/results/extraction/fungal_extraction/mapping_work/variants -name 'medaka.vcf') ]]; then
+	for file in \$(find /home/aziz/pipeline/results/extraction/fungal_extraction/mapping_work/variants -type f -name "medaka.vcf")
+	do
+		subdirectory=\$(dirname "\$file")
+		last_dir=\$(basename "\$subdirectory")
+		/home/aziz/anaconda3/envs/second_part/bin/rtg vcffilter -q 30 -i "\$file" -o "\${last_dir}"
+	done
+else
+	touch variants_filtration_null.txt
+fi
+"""
+}
+
+
+process consensus_sequence {
+
+publishDir("${params.variants_output}" , mode: 'copy') 
+
+input:
+path variantsfiles
+
+output:
+path "*" , emit: filtratedvariants
+
+script:
+"""
+if [[ \$(find /home/aziz/pipeline/results/extraction/fungal_extraction/mapping_work/variants -name '*.vcf.gz') ]]; then
+	for vcf in /home/aziz/pipeline/results/extraction/fungal_extraction/mapping_work/variants/*.vcf.gz
+	do
+		vcf_basename=\$(basename "\${vcf}" .vcf.gz)
+		zcat "\${vcf}" | awk '!/^#/' > "without_header_\${vcf_basename}.txt"
+		awk '{print \$1}' "without_header_\${vcf_basename}.txt" | sort | uniq > "chroms_\${vcf_basename}.txt"
+		awk 'FNR==NR { strings[tolower(\$1)] = 1; next; } /^>/ { id=\$1; sub(/^>/, "", id); split(id, words, " "); first_word = tolower(words[1]); if (first_word in strings) { seq_found = 1; } else { seq_found = 0; } } seq_found' "chroms_\${vcf_basename}.txt" /home/aziz/pipeline/genes.fna > "final_genes_\${vcf_basename}.fasta"
+		/home/aziz/anaconda3/envs/second_part/bin/bcftools consensus -f "final_genes_\${vcf_basename}.fasta" "\$vcf" > consensus_\${vcf_basename}.fasta
+		rm "without_header_\${vcf_basename}.txt"
+		rm "chroms_\${vcf_basename}.txt"
+	done
+else
+	touch consensus_sequence_null.txt
+fi
+"""
+
+
+}
+
+process prokaryote_assembly {
+
+publishDir("${params.assembly_output}" , mode: 'copy') 
+errorStrategy = 'ignore'
+input:
+path prokfastq
+
+output:
+path "*" , emit: prokfastq_out
+
+script:
+"""
+if [[ \$(find /home/aziz/pipeline/results/extraction/bacterial_extraction -name '*.fastq') ]]; then
+	for fastqseq in /home/aziz/pipeline/results/extraction/bacterial_extraction/*.fastq
+	do
+		fastqseq_basename=\$(basename "\${fastqseq}" .fastq)
+		/home/aziz/anaconda3/envs/second_part/bin/flye --nano-raw "\$fastqseq" --out-dir "\${fastqseq_basename}"
+		
+	done
+else
+	touch assembly_null.txt
+fi		
+"""
+}
+
+process AMRgenes_in_prokaryotes {
+
+publishDir("${params.amr_output}" , mode: 'copy') 
+
+input:
+path assembledseq
+
+output:
+path "*" , emit: amrgenes_out
+
+script:
+"""
+if [[ \$(find /home/aziz/pipeline/results/extraction/bacterial_extraction/assembly -name 'assembly.fasta') ]]; then
+	for assembledgenome in \$(find /home/aziz/pipeline/results/extraction/bacterial_extraction/assembly -type f -name "assembly.fasta")
+	do
+		pathdirectory=\$(dirname "\$assembledgenome")
+		last_directory=\$(basename "\$pathdirectory")
+		conda run -n abricate abricate "\$assembledgenome" --db ncbi --csv > "\${last_directory}.csv"
+	done
+else
+	touch 	AMRgenes_null.txt
+fi	
+	
+	
+	
+"""
+
+
+}
+
+
+process pipeline_report {
+publishDir("${params.pipereport_output}" , mode: 'copy') 
+
+input:
+path allfiles
+
+output:
+path "*" , emit: pipreport_out
+
+script:
+"""
+echo "***************************************************************************************" > pipeline_report.txt
+echo "IDENTIFIED SPECIES" >> pipeline_report.txt
+echo "***************************************************************************************" >> pipeline_report.txt
+echo >> pipeline_report.txt
+
+unclassified_reads=\$(awk 'NR==1 {print \$2}' /home/aziz/pipeline/results/classification_after_filtration/final_report.report)
+classified_reads=\$(awk 'NR==2 {print \$2}' /home/aziz/pipeline/results/classification_after_filtration/final_report.report)
+allreads=\$(awk "BEGIN {print \$unclassified_reads + \$classified_reads}")
+echo "le nombre de séquences total est : \${allreads}" >> pipeline_report.txt	
+echo >> pipeline_report.txt
+echo "le nombre de séquences assignées est : \${classified_reads}" >> pipeline_report.txt	
+echo >> pipeline_report.txt
+echo "le nombre de séquences non assignées est : \${unclassified_reads}" >> pipeline_report.txt	
+echo >> pipeline_report.txt
+echo "------------------------------------" >> pipeline_report.txt
+echo >> pipeline_report.txt
+echo "les especes fongiques identifiées et qui présentent des pourcentages supérieurs à 1% sont:" >> pipeline_report.txt
+if [[ -f "/home/aziz/pipeline/results/extraction/fungal_species.txt" ]]; then
+    	report_file=/home/aziz/pipeline/results/classification_after_filtration/final_report.report
+	while IFS= read -r species_name; do
+ 		percentage=\$(grep -m 1 "\\b\${species_name}\\b" "\$report_file" | awk '{print \$1}')
+ 		number_of_reads=\$(grep -m 1 "\\b\${species_name}\\b" "\$report_file" | awk '{print \$2}')
+		echo "species: \${species_name}, percentage: \${percentage} , number of reads : \${number_of_reads}" >> pipeline_report.txt
+	done < "/home/aziz/pipeline/results/extraction/fungal_species.txt"	
+else
+	echo "--->aucune espèce" >> pipeline_report.txt
+fi
+echo >> pipeline_report.txt
+echo "------------------------------------" >> pipeline_report.txt
+echo >> pipeline_report.txt
+echo "les especes bactériennes identifiées et qui présentent des pourcentages supérieurs à 1% sont:" >> pipeline_report.txt
+if [[ -f "/home/aziz/pipeline/results/extraction/bacterial_species.txt" ]]; then
+	while IFS= read -r speciees_name; do
+ 		peercentage=\$(grep -m 1 "\\b\${speciees_name}\\b" "\$report_file" | awk '{print \$1}')
+ 		numberr_of_reads=\$(grep -m 1 "\\b\${speciees_name}\\b" "\$report_file" | awk '{print \$2}')
+		echo "species: \${speciees_name}, percentage: \${peercentage} , number of reads : \${numberr_of_reads}" >> pipeline_report.txt
+	done < "/home/aziz/pipeline/results/extraction/bacterial_species.txt"		
+else
+	echo "---> aucune espèce" >> pipeline_report.txt
+fi
+echo >> pipeline_report.txt
+echo "***************************************************************************************" >> pipeline_report.txt 
+echo "FUNGAL PIPELINE" >> pipeline_report.txt
+echo "***************************************************************************************" >> pipeline_report.txt 
+echo >> pipeline_report.txt
+echo "en cas de présence des especès fongiqus, leurs séquences vont etre alignées avec les séquences des gènes présents dans le fichier genes.fna" >> pipeline_report.txt   
+echo >> pipeline_report.txt
+if [[ \$(find /home/aziz/pipeline/results/extraction/fungal_extraction/mapping_work -name '*.bam') ]]; then
+	echo "l'alignment a generé les fichiers suivants : " >> pipeline_report.txt
+	for bamfiile in /home/aziz/pipeline/results/extraction/fungal_extraction/mapping_work/*.bam
+	do
+		echo >> pipeline_report.txt
+		echo "\${bamfiile}" >> pipeline_report.txt
+		num_sequences=\$(/home/aziz/anaconda3/envs/second_part/bin/samtools view -c "\${bamfiile}")
+		echo "le nombre des séquences alignées dans ce fichier est: \${num_sequences}" >> pipeline_report.txt
+
+	done
+else
+	echo "-->pas d'alignement faite entre les lectures métagénomiques et les gènes présents dans le fichier genes.fna à cause d'absence des espéces fongiques présentant des pourcentages supérieurs à 1% dans l'échantillon" >> pipeline_report.txt
+fi
+echo >> pipeline_report.txt
+echo "------------------------------------" >> pipeline_report.txt 
+
+if [[ \$(find /home/aziz/pipeline/results/extraction/fungal_extraction/mapping_work/variants -name '*.vcf.gz') ]]; then
+	echo "Les variants identifiés sont dans le(s) fichier(s) suivants: " >> pipeline_report.txt
+	for vccf in /home/aziz/pipeline/results/extraction/fungal_extraction/mapping_work/variants/*.vcf.gz
+	do
+		echo >> pipeline_report.txt
+		vcf_baseename=\$(basename "\${vccf}" .gz)
+		echo "\${vcf_baseename}" >> pipeline_report.txt
+		echo "Le nombre des variants identifiés pour ce fichier est: \$(/home/aziz/anaconda3/envs/second_part/bin/bcftools view -H "\${vccf}" | grep -v '^#' | wc -l)" >> pipeline_report.txt
+		zcat "\${vccf}" | awk '!/^#/' > "without_header_\${vcf_baseename}.txt"
+		echo "ces variants sont identifiés par rapport au gène(s) de résistance suivant(s) : \$(awk '{print \$1}' "without_header_\${vcf_baseename}.txt" | sort | uniq)" >> pipeline_report.txt
+		rm "without_header_\${vcf_baseename}.txt"
+	done
+else
+	echo "pas d'appel de variants entre les lectures métagénomiques et les gènes présents dans le fichier genes.fna à cause d'absence des espéces fongiques présentant des pourcentages supérieurs à 1% dans l'échantillon" >> pipeline_report.txt
+fi
+echo >> pipeline_report.txt
+echo "***************************************************************************************" >> pipeline_report.txt 
+echo "BACTERIAL PIPELINE" >> pipeline_report.txt
+echo "***************************************************************************************" >> pipeline_report.txt 
+echo >> pipeline_report.txt
+if [[ \$(find /home/aziz/pipeline/results/extraction/bacterial_extraction -name '*.fastq') ]]; then
+	echo "Les lectures de chaque espèce bactérienne ont été rassemblé dans le(s) fichier(s) suivant(s) : " >> pipeline_report.txt
+	echo >> pipeline_report.txt
+	for toassemble in /home/aziz/pipeline/results/extraction/bacterial_extraction/*.fastq
+	do
+		echo "\${toassemble}" >> pipeline_report.txt
+	done
+else 
+	echo "Pas de lectures bactériennes extraites à cause d'absence des espèces bactériennes" >> pipeline_report.txt
+fi
+echo >> pipeline_report.txt
+echo "------------------------------------" >> pipeline_report.txt 
+echo >> pipeline_report.txt
+if [[ \$(find /home/aziz/pipeline/results/extraction/bacterial_extraction/assembly -name 'assembly.fasta') ]]; then
+	echo "Les lectures de chaque espèce sont assemblés et les génomes créés sont : " >> pipeline_report.txt
+	echo >> pipeline_report.txt
+	for assembledgenome in \$(find /home/aziz/pipeline/results/extraction/bacterial_extraction/assembly -type f -name "assembly.fasta")
+	do
+		pathdirectory=\$(dirname "\$assembledgenome")
+		last_directory=\$(basename "\$pathdirectory")
+		echo "\${last_directory}" >> pipeline_report.txt
+		echo "Le nombre de contigs formés pour ce génome est: \$(grep -o '>' "\${assembledgenome}" | wc -l)" >> pipeline_report.txt
+		echo >> pipeline_report.txt
+	done
+else
+	echo "Pas d'assemblage des génomes bactériens à cause d'absence des espèces bactériennes" >> pipeline_report.txt
+fi
+echo >> pipeline_report.txt
+echo "------------------------------------" >> pipeline_report.txt 
+echo >> pipeline_report.txt
+if [[ \$(find /home/aziz/pipeline/results/extraction/bacterial_extraction/AMR_genes -name '*.csv') ]]; then
+	echo "Le pipeline a ainsi cherché les gènes de resistance présents dans ce(s) génome(s) : " >> pipeline_report.txt
+	echo >> pipeline_report.txt
+	for amrcsv in \$(find /home/aziz/pipeline/results/extraction/bacterial_extraction/AMR_genes -type f -name "*.csv")
+	do
+		echo "\${amrcsv}" >> pipeline_report.txt
+		echo "Le nombre des gènes de résistance trouvés dans ce génome est : \$(grep -o '/home/aziz/pipeline' "\${amrcsv}" | wc -l)" >> pipeline_report.txt
+	done
+else
+	echo "pas d'identification des gènes de resistance à cause d'absence des espèces bactériennes" >> pipeline_report.txt
+fi
+
+
+
+
+
+		 
+"""
+
+
+}
+
+
+
+
+
+
+
+
+
+
+workflow {
+
+reads_ch=Channel.fromPath(params.reads)
+//taxonomic_classification(reads_ch)
+//taxonomic_classification.out.classification_out.view()
+
+firstreport_ch=Channel.fromPath(params.krakenreport)
+//filtration(firstreport_ch)
+//filtration.out.filtration_out.view()
+
+
+//fungalnames_ch=Channel.fromPath(params.fungaalnames)
+krakenfile_ch=Channel.fromPath(params.krakeenfile)
+
+readsforVC_ch=Channel.fromPath(params.variants_in)
+
+taxonomic_classification(reads_ch) | first_filtration | final_filtration | species_of_interest | taxid | lineage | separation | names | fungal_accessions_extraction | fungal_reads_extraction | bacterial_accessions_extraction | bacterial_reads_extraction| mapping | SAMtoBAM | BAMtoFASTQ | variantscalling_medaka | variants_filtration | consensus_sequence | prokaryote_assembly | AMRgenes_in_prokaryotes | pipeline_report | view
+}
